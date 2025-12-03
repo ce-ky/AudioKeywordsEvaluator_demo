@@ -3,10 +3,9 @@ import { GoogleGenAI } from "@google/genai";
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
- * Transcribes audio and returns the full text.
- * We perform keyword matching on the client side to ensure
- * precise control over the UI state, but we rely on Gemini's
- * powerful multimodal capabilities to understand the speech.
+ * Transcribes audio and returns the full text verbatim.
+ * This function uses Multilingual ASR capabilities to detect the language(s)
+ * automatically and transcribe exactly what is spoken without translation.
  */
 export const analyzeAudio = async (
   base64Audio: string,
@@ -26,7 +25,11 @@ export const analyzeAudio = async (
             },
           },
           {
-            text: "Please provide a verbatim transcription of this audio file. Do not add any commentary, just the spoken text.",
+            text: `Please provide a verbatim transcription of this audio file. 
+            The audio may contain Chinese, English, Japanese, or a mix of these languages. 
+            Transcribe exactly what is spoken in the original language used by the speaker. 
+            Do not translate the content. 
+            Do not add any commentary or markdown formatting, just provide the raw transcription text.`,
           },
         ],
       },

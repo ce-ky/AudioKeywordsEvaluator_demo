@@ -46,14 +46,21 @@ const App: React.FC = () => {
   };
 
   // Auto-transcribe whenever currentAudio changes
+  // Note: We removed 'language' from dependency because we now use Multilingual ASR
+  // Switching UI language should NOT re-transcribe the audio.
   useEffect(() => {
     const autoTranscribe = async () => {
       if (!currentAudio) return;
 
       setIsTranscribing(true);
       setError(null);
+      // Reset analysis state when new audio starts transcribing
+      setHasAnalyzed(false);
+      setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0 })));
+
       try {
         const base64Audio = await blobToBase64(currentAudio.blob);
+        // Using Multilingual ASR - no language parameter needed
         const resultText = await analyzeAudio(base64Audio, currentAudio.mimeType);
         setTranscription(resultText);
       } catch (err: any) {
@@ -144,34 +151,6 @@ const App: React.FC = () => {
                   <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
               </div>
            </div>
-
-           <div className="h-6 w-px bg-slate-200"></div>
-
-           {/* Analysis Button - Global Action */}
-           <button
-              onClick={handleProcessAudio}
-              disabled={!currentAudio || isProcessing || isTranscribing || !transcription}
-              className={`px-6 py-2 rounded-lg font-bold text-white text-sm shadow-md transition-all transform active:scale-95 flex items-center gap-2 ${
-                  !currentAudio || isProcessing || isTranscribing || !transcription
-                  ? 'bg-slate-300 cursor-not-allowed shadow-none'
-                  : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'
-              }`}
-          >
-              {isProcessing || isTranscribing ? (
-                  <>
-                      <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      {isTranscribing ? t.analyzing : t.analyzing} 
-                  </>
-              ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                    {t.startAnalysis}
-                  </>
-              )}
-          </button>
         </div>
       </header>
 
@@ -220,6 +199,34 @@ const App: React.FC = () => {
             </section>
         </main>
       </div>
+
+      {/* Fixed Bottom Footer for Action Button */}
+      <footer className="flex-none bg-white border-t border-slate-200 p-4 z-20 shadow-[0_-4px_10px_rgba(0,0,0,0.03)] flex justify-center">
+        <button
+            onClick={handleProcessAudio}
+            disabled={!currentAudio || isProcessing || isTranscribing || !transcription}
+            className={`w-full max-w-2xl py-3 rounded-xl font-bold text-white text-base shadow-lg transition-all transform active:scale-[0.99] flex items-center justify-center gap-2 ${
+                !currentAudio || isProcessing || isTranscribing || !transcription
+                ? 'bg-slate-300 cursor-not-allowed shadow-none'
+                : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300'
+            }`}
+        >
+            {isProcessing || isTranscribing ? (
+                <>
+                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    {isTranscribing ? t.analyzing : t.analyzing} 
+                </>
+            ) : (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                  {t.startAnalysis}
+                </>
+            )}
+        </button>
+      </footer>
     </div>
   );
 };
