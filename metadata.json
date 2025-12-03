@@ -1,0 +1,7 @@
+{
+  "name": "语音关键词识别助手",
+  "description": "上传或录制音频，利用 Gemini 2.5 Flash 检测特定关键词。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
