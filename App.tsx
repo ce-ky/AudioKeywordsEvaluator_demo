@@ -1,8 +1,10 @@
+
 import React, { useState, useEffect } from 'react';
 import AudioInput from './components/AudioInput';
 import KeywordManager from './components/KeywordManager';
-import { Keyword, Language } from './types';
-import { analyzeAudio } from './services/geminiService';
+import { AnalysisStats } from './components/AnalysisStats';
+import { Keyword, Language, SttProvider } from './types';
+import { analyzeAudio, analyzeKeywordsWithLLM, translateTextList } from './services/geminiService';
 import { blobToBase64 } from './utils/audioUtils';
 import { translations, INITIAL_KEYWORDS_BY_LANG } from './utils/translations';
 
@@ -15,7 +17,15 @@ const App: React.FC = () => {
   const [isTranscribing, setIsTranscribing] = useState(false); // Used for API call status
   const [hasAnalyzed, setHasAnalyzed] = useState(false); // Track if analysis has been performed on current audio
   const [transcription, setTranscription] = useState<string | null>(null);
+  // Track detected audio language to enable cross-language matching
+  const [audioLanguage, setAudioLanguage] = useState<string | null>(null);
+  
+  const [markedTranscription, setMarkedTranscription] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Store initial transcription from Web Speech API to bypass Gemini
+  const [initialTranscription, setInitialTranscription] = useState<string | null>(null);
+  // STT Provider State
+  const [sttProvider, setSttProvider] = useState<SttProvider>('web_speech');
 
   const t = translations[language];
 
@@ -36,33 +46,69 @@ const App: React.FC = () => {
     setLanguage(newLang);
   };
 
-  const handleAudioReady = (blob: Blob, mimeType: string) => {
+  const handleClearAudio = () => {
+    setCurrentAudio(null);
+    setTranscription(null);
+    setAudioLanguage(null);
+    setMarkedTranscription(null);
+    setError(null);
+    setHasAnalyzed(false);
+    setInitialTranscription(null);
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+  };
+
+  const handleAudioReady = (blob: Blob, mimeType: string, text?: string) => {
     setCurrentAudio({ blob, mimeType });
     setTranscription(null);
+    setAudioLanguage(null);
+    setMarkedTranscription(null);
     setError(null);
     setHasAnalyzed(false); // Reset analysis state for new audio
     // Reset detection status when new audio is loaded
-    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0 })));
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+    
+    // If text is provided (from Web Speech API or Example), store it
+    if (text) {
+        setInitialTranscription(text);
+        // For Web Speech, we assume the language is the one currently selected by the user
+        // because Web Speech requires explicit language setting.
+        setAudioLanguage(language);
+    } else {
+        setInitialTranscription(null);
+    }
   };
 
-  // Auto-transcribe whenever currentAudio changes
-  // Note: We removed 'language' from dependency because we now use Multilingual ASR
-  // Switching UI language should NOT re-transcribe the audio.
+  // Auto-transcribe whenever currentAudio or sttProvider changes
   useEffect(() => {
     const autoTranscribe = async () => {
       if (!currentAudio) return;
 
+      // Special handling for Web Speech Pre-filled
+      // If we already have initial text from Web Speech, we skip Gemini call.
+      if (initialTranscription && sttProvider === 'web_speech') {
+          // Immediate for Web Speech
+          setTranscription(initialTranscription);
+          setAudioLanguage(language); // Web speech uses current app language
+          setMarkedTranscription(null);
+          setError(null);
+          setHasAnalyzed(false);
+          setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+          return;
+      }
+
+      // Logic for Gemini Provider (or Fallback if no initial text)
       setIsTranscribing(true);
       setError(null);
-      // Reset analysis state when new audio starts transcribing
       setHasAnalyzed(false);
-      setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0 })));
+      setMarkedTranscription(null);
+      setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
 
       try {
         const base64Audio = await blobToBase64(currentAudio.blob);
-        // Using Multilingual ASR - no language parameter needed
-        const resultText = await analyzeAudio(base64Audio, currentAudio.mimeType);
-        setTranscription(resultText);
+        // Using Multilingual ASR - returns { text, language }
+        const result = await analyzeAudio(base64Audio, currentAudio.mimeType);
+        setTranscription(result.text);
+        setAudioLanguage(result.language);
       } catch (err: any) {
         console.error("Transcription error:", err);
         setError(t.processError);
@@ -72,10 +118,13 @@ const App: React.FC = () => {
     };
 
     autoTranscribe();
-  }, [currentAudio, t.processError]);
+  }, [currentAudio, initialTranscription, sttProvider, t.processError, language]);
+
+  const resetResults = () => {
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+  };
 
   const handleProcessAudio = async () => {
-    // This now only triggers the keyword matching highlight logic
     if (!currentAudio) return;
     if (keywords.length === 0) {
         setError(t.noKeywordsError);
@@ -84,42 +133,110 @@ const App: React.FC = () => {
     
     // If transcription failed or hasn't started yet (edge case)
     if (!transcription && !isTranscribing) {
-        setError(t.processError); // Or a specific error about missing transcription
+        setError(t.processError); 
         return;
     }
 
     setIsProcessing(true);
     setError(null);
 
-    // Simulate a brief processing delay for visual feedback, 
-    // since client-side matching is instant
-    setTimeout(() => {
-      try {
-        if (!transcription) {
-            throw new Error("No transcription available");
+    try {
+        if (!transcription) throw new Error("No transcription available");
+
+        // --- Cross-Language Translation Logic ---
+        let searchKeywords = [...keywords];
+        // Map: Translated Text -> Original Keyword ID (to map results back)
+        const translationMap: Record<string, string> = {}; 
+        
+        // Detect if we need translation:
+        // If we have detected audio language, and it doesn't match current UI language prefix
+        const needsTranslation = audioLanguage && !audioLanguage.toLowerCase().startsWith(language.toLowerCase());
+
+        if (needsTranslation) {
+             console.log(`Language mismatch detected. App: ${language}, Audio: ${audioLanguage}. Translating keywords...`);
+             const originalTexts = keywords.map(k => k.text);
+             const translatedMap = await translateTextList(originalTexts, audioLanguage);
+             
+             // Update searchKeywords to use translated text
+             searchKeywords = keywords.map(k => {
+                 const translatedText = translatedMap[k.text] || k.text; // Fallback to original if translation fails
+                 translationMap[translatedText] = k.id; // Map translated text back to ID
+                 return { ...k, text: translatedText };
+             });
+        } else {
+             // No translation needed, map original text to ID
+             keywords.forEach(k => {
+                 translationMap[k.text] = k.id;
+             });
         }
 
+        // 1. Client-side Fast Match (using searchKeywords - potentially translated)
         const normalizedTranscription = transcription.toLowerCase();
+        
+        // We calculate matches on searchKeywords, but need to update the ORIGINAL 'keywords' state
+        // Create a map of updates based on ID
+        const updates: Record<string, Partial<Keyword>> = {};
 
-        // Update keywords detected status
-        const updatedKeywords = keywords.map(keyword => {
-            const lowerKeyword = keyword.text.toLowerCase();
+        searchKeywords.forEach(sk => {
+            const lowerKeyword = sk.text.toLowerCase();
             const isDetected = normalizedTranscription.includes(lowerKeyword);
-            return {
-              ...keyword,
-              detected: isDetected,
-              matchCount: isDetected ? 1 : 0 // Simple boolean match for now
+            
+            // If translated, finding the ID is tricky if multiple keywords translate to same word, 
+            // but we use the index based logic or the map we created.
+            // Since we reconstructed searchKeywords from keywords, the ID is preserved in the object.
+            updates[sk.id] = {
+                detected: isDetected,
+                matchCount: isDetected ? 1 : 0,
+                fuzzyCount: 0,
+                fuzzySegments: []
             };
         });
-        setKeywords(updatedKeywords);
-        setHasAnalyzed(true); // Enable stats display
 
-      } catch (err: any) {
+        // 2. Server-side Deep Semantic Match (LLM) using searchKeywords
+        const keywordTextsToSearch = searchKeywords.map(k => k.text);
+        const result = await analyzeKeywordsWithLLM(transcription, keywordTextsToSearch);
+
+        // 3. Merge results back into state
+        if (result) {
+            setMarkedTranscription(result.marked_transcript);
+
+            const analysisResults = result.analysis;
+            if (analysisResults && analysisResults.length > 0) {
+                analysisResults.forEach(r => {
+                    // r.object is the text used for searching (translated text if applicable)
+                    // We need to find the corresponding original keyword ID.
+                    
+                    // Strategy: Find the searchKeyword that matches r.object
+                    const matchedSearchKeyword = searchKeywords.find(sk => sk.text === r.object);
+                    
+                    if (matchedSearchKeyword) {
+                        const originalId = matchedSearchKeyword.id;
+                        updates[originalId] = {
+                            ...updates[originalId], // keep previous simple match if needed, but usually LLM overrides
+                            detected: r.absolute_pair > 0,
+                            matchCount: r.absolute_pair,
+                            fuzzyCount: r.blur_pair,
+                            fuzzySegments: r.fuzzy_segments || []
+                        };
+                    }
+                });
+            }
+        }
+
+        // Apply all updates to the original keywords state
+        setKeywords(prev => prev.map(k => {
+            const update = updates[k.id];
+            return update ? { ...k, ...update } : k;
+        }));
+
+        setHasAnalyzed(true);
+
+    } catch (err: any) {
+        console.error(err);
         setError(t.processError);
-      } finally {
+    } finally {
         setIsProcessing(false);
-      }
-    }, 500);
+    }
   };
 
   return (
@@ -136,6 +253,21 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-4">
+           {/* STT Provider Settings */}
+           <div className="flex items-center gap-2 mr-2 border-r border-slate-200 pr-4">
+               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide hidden sm:block">
+                   {t.settings.label}
+               </label>
+               <select
+                   value={sttProvider}
+                   onChange={(e) => setSttProvider(e.target.value as SttProvider)}
+                   className="appearance-none bg-indigo-50 border border-indigo-100 text-indigo-700 py-1.5 pl-3 pr-8 rounded-lg leading-tight focus:outline-none focus:bg-white focus:border-indigo-500 text-xs font-semibold cursor-pointer transition-colors"
+               >
+                   <option value="web_speech">{t.settings.providers.web_speech}</option>
+                   <option value="gemini">{t.settings.providers.gemini}</option>
+               </select>
+           </div>
+
            {/* Language Selector */}
            <div className="relative">
               <select
@@ -143,9 +275,9 @@ const App: React.FC = () => {
                   onChange={(e) => handleLanguageChange(e.target.value as Language)}
                   className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-3 pr-8 rounded-lg leading-tight focus:outline-none focus:bg-white focus:border-indigo-500 text-sm font-medium cursor-pointer transition-colors hover:border-slate-300"
               >
-                  <option value="zh">🇨🇳 中文</option>
-                  <option value="en">🇺🇸 English</option>
-                  <option value="ja">🇯🇵 日本語</option>
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                  <option value="ja">日本語</option>
               </select>
               <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
                   <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
@@ -165,11 +297,15 @@ const App: React.FC = () => {
               <div className="shrink-0">
                 <AudioInput
                     onAudioReady={handleAudioReady}
+                    onClearAudio={handleClearAudio}
                     isProcessing={isProcessing}
                     t={t.audioInput}
                     transcription={transcription}
+                    markedTranscription={markedTranscription}
                     isTranscribing={isTranscribing}
                     keywords={keywords}
+                    language={language}
+                    sttProvider={sttProvider}
                 />
               </div>
               
@@ -186,17 +322,33 @@ const App: React.FC = () => {
            </div>
         </aside>
 
-        {/* Right Content: Keyword Manager Only */}
-        <main className="flex-1 flex flex-col min-w-0 bg-slate-50/50 p-6 gap-6 overflow-hidden">
-            <section className="flex-1 min-h-0 flex flex-col transition-all duration-300">
-                 <KeywordManager
-                    keywords={keywords}
-                    setKeywords={setKeywords}
-                    isProcessing={isProcessing}
-                    hasAnalyzed={hasAnalyzed}
-                    t={t.keywordManager}
-                  />
-            </section>
+        {/* Right Content: Stats & Keyword Manager */}
+        <main className="flex-1 flex flex-col min-w-0 bg-slate-50/50 p-6 overflow-hidden">
+            <div className="max-w-7xl w-full mx-auto h-full flex flex-col">
+                {/* Stats Section - Separated */}
+                {hasAnalyzed && (
+                    <div className="flex-none">
+                        <AnalysisStats 
+                            keywords={keywords}
+                            hasAnalyzed={hasAnalyzed}
+                            t={t.keywordManager}
+                            onReset={resetResults}
+                            isProcessing={isProcessing}
+                        />
+                    </div>
+                )}
+
+                {/* Keyword List - Takes remaining space */}
+                <section className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                     <KeywordManager
+                        keywords={keywords}
+                        setKeywords={setKeywords}
+                        isProcessing={isProcessing}
+                        hasAnalyzed={hasAnalyzed}
+                        t={t.keywordManager}
+                      />
+                </section>
+            </div>
         </main>
       </div>
 
@@ -217,7 +369,7 @@ const App: React.FC = () => {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    {isTranscribing ? t.analyzing : t.analyzing} 
+                    {isProcessing ? t.analyzingDeep : t.analyzing} 
                 </>
             ) : (
                 <>

@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { Keyword } from '../types';
 import { translations } from '../utils/translations';
@@ -11,11 +12,24 @@ interface KeywordManagerProps {
 }
 
 const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, isProcessing, hasAnalyzed, t }) => {
+  // Add Mode State
+  const [isAdding, setIsAdding] = useState(false);
   const [newKeyword, setNewKeyword] = useState('');
+  const addInputRef = useRef<HTMLInputElement>(null);
+
+  // Edit Mode State
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
 
+  // Focus input when adding mode starts
+  useEffect(() => {
+    if (isAdding && addInputRef.current) {
+      addInputRef.current.focus();
+    }
+  }, [isAdding]);
+
+  // Focus input when editing starts
   useEffect(() => {
     if (editingId && editInputRef.current) {
       editInputRef.current.focus();
@@ -24,9 +38,22 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
 
   // Helper: check if string is mostly ASCII (for 20 char limit) or CJK (10 char limit)
   const getCharLimit = (str: string) => {
-    // If string contains only ASCII characters, limit is 20. Otherwise 10.
     const isAscii = /^[\x00-\xff]*$/.test(str);
     return isAscii ? 20 : 10;
+  };
+
+  // Helper to render character count indicator
+  const renderCharCount = (text: string) => {
+    if (!text) return null;
+    const limit = getCharLimit(text);
+    const length = text.length;
+    const isOver = length > limit;
+    
+    return (
+      <span className={`text-[10px] font-mono pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 transition-colors ${isOver ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
+        {length}/{limit}
+      </span>
+    );
   };
 
   const validateKeyword = (text: string, currentId?: string): string | null => {
@@ -47,10 +74,12 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
     return null;
   };
 
-  const addKeyword = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  const submitAddKeyword = () => {
     const trimmed = newKeyword.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+        setIsAdding(false);
+        return;
+    }
 
     // Check Max Count (100)
     if (keywords.length >= 100) {
@@ -68,11 +97,22 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
       id: crypto.randomUUID(),
       text: trimmed,
       detected: false,
-      matchCount: 0
+      matchCount: 0,
+      fuzzyCount: 0
     };
 
-    setKeywords(prev => [...prev, keyword]);
+    setKeywords(prev => [keyword, ...prev]); // Add to beginning of list
     setNewKeyword('');
+    setIsAdding(false);
+  };
+
+  const handleAddKeyDown = (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') {
+          submitAddKeyword();
+      } else if (e.key === 'Escape') {
+          setIsAdding(false);
+          setNewKeyword('');
+      }
   };
 
   const removeKeyword = (id: string) => {
@@ -82,6 +122,7 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
   const startEditing = (k: Keyword) => {
     setEditingId(k.id);
     setEditText(k.text);
+    setIsAdding(false); // Close add mode if open
   };
 
   const cancelEdit = () => {
@@ -106,7 +147,7 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
 
     setKeywords(prev => prev.map(k => 
         k.id === editingId 
-            ? { ...k, text: trimmed, detected: false, matchCount: 0 } 
+            ? { ...k, text: trimmed, detected: false, matchCount: 0, fuzzyCount: 0 } 
             : k
     ));
     setEditingId(null);
@@ -121,158 +162,172 @@ const KeywordManager: React.FC<KeywordManagerProps> = ({ keywords, setKeywords, 
     }
   };
 
-  const clearResults = () => {
-    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0 })));
-  };
-
-  // Calculate stats
-  const detectedCount = keywords.filter(k => k.detected).length;
-  const totalCount = keywords.length;
-  const hitRate = totalCount > 0 ? Math.round((detectedCount / totalCount) * 100) : 0;
-
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 h-full flex flex-col">
-      <div className="p-6 border-b border-slate-100 flex justify-between items-center">
-        <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 h-full flex flex-col relative overflow-hidden">
+      {/* Header Container */}
+      <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-white z-20 sticky top-0 min-h-[64px] relative">
+        
+        {/* Title - Always Visible */}
+        <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
             {t.title}
-            <span className="text-xs font-normal text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+            <span className="text-[10px] font-normal text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
                 {keywords.length}/100
             </span>
         </h2>
-        {keywords.length > 0 && (
-             <button
-                onClick={clearResults}
+
+        {/* Add Button - Visible only when NOT adding */}
+        {!isAdding && (
+            <button
+                onClick={() => setIsAdding(true)}
                 disabled={isProcessing}
-                className="text-xs text-slate-400 hover:text-indigo-600 font-medium transition-colors"
-             >
-                {t.reset}
-             </button>
+                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 hover:border-indigo-200 px-3 py-1.5 rounded-lg transition-all active:scale-95"
+            >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                {t.add}
+            </button>
+        )}
+
+        {/* Add Input Overlay - Visible when adding (Occupies right half) */}
+        {isAdding && (
+             <div className="absolute right-0 top-0 bottom-0 z-30 w-full md:w-1/2 bg-white md:border-l border-slate-100 px-3 flex items-center gap-2 animate-in slide-in-from-right-8 duration-200">
+                <div className="relative flex-1">
+                    <input
+                        ref={addInputRef}
+                        type="text"
+                        value={newKeyword}
+                        onChange={(e) => setNewKeyword(e.target.value)}
+                        onKeyDown={handleAddKeyDown}
+                        placeholder={t.inputPlaceholder}
+                        className="w-full px-3 py-2 text-xs bg-slate-50 border border-indigo-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-700 placeholder-slate-400 transition-all"
+                    />
+                     {renderCharCount(newKeyword)}
+                </div>
+                <button
+                    onClick={submitAddKeyword}
+                    disabled={!newKeyword.trim()}
+                    className="p-2 text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm disabled:opacity-50 disabled:bg-slate-300 transition-colors flex-shrink-0"
+                >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                </button>
+                <button
+                    onClick={() => { setIsAdding(false); setNewKeyword(''); }}
+                    className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex-shrink-0"
+                >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+             </div>
         )}
       </div>
 
-      <div className="p-6 flex-1 flex flex-col overflow-hidden">
-        
-        {/* Hit Rate Stats Section */}
-        {hasAnalyzed && totalCount > 0 && (
-          <div className="mb-6 bg-gradient-to-r from-indigo-50 to-indigo-50/50 border border-indigo-100 rounded-xl p-4 animate-in fade-in slide-in-from-top-4 duration-500">
-             <div className="flex justify-between items-end mb-2">
-                <span className="text-sm font-semibold text-indigo-900 flex items-center gap-2">
-                    <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-                    {t.hitRate}
-                </span>
-                <div className="text-right">
-                    <span className="text-2xl font-bold text-indigo-700">{hitRate}%</span>
-                </div>
-             </div>
-             
-             {/* Progress Bar */}
-             <div className="w-full bg-white/60 rounded-full h-2.5 overflow-hidden shadow-inner">
-                <div 
-                    className="bg-indigo-600 h-full rounded-full transition-all duration-1000 ease-out" 
-                    style={{ width: `${hitRate}%` }}
-                ></div>
-             </div>
-             
-             <div className="mt-2 flex justify-end">
-                <span className="text-xs font-medium text-indigo-600 bg-indigo-100/50 px-2 py-0.5 rounded-md">
-                   {detectedCount} / {totalCount}
-                </span>
-             </div>
-          </div>
-        )}
+      <div className="p-4 flex-1 overflow-y-auto pr-1">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 pb-2">
+            
+            {/* Keywords List */}
+            {keywords.map((keyword) => {
+              const isExact = keyword.detected;
+              const isFuzzyOnly = !isExact && (keyword.fuzzyCount || 0) > 0;
+              
+              // Styling logic
+              const containerClass = isExact 
+                  ? 'bg-emerald-50 border-emerald-200 shadow-sm' 
+                  : isFuzzyOnly 
+                      ? 'bg-amber-50 border-amber-200 shadow-sm'
+                      : 'bg-white border-slate-100 hover:border-slate-300 hover:shadow-sm';
+              
+              const dotClass = isExact
+                  ? 'bg-emerald-500'
+                  : isFuzzyOnly
+                      ? 'bg-amber-500'
+                      : 'bg-slate-300';
+              
+              const textClass = isExact
+                  ? 'text-emerald-900'
+                  : isFuzzyOnly
+                      ? 'text-amber-900'
+                      : 'text-slate-700';
 
-        <form onSubmit={addKeyword} className="flex gap-2 mb-6">
-          <input
-            type="text"
-            value={newKeyword}
-            onChange={(e) => setNewKeyword(e.target.value)}
-            placeholder={t.inputPlaceholder}
-            disabled={isProcessing}
-            className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
-          />
-          <button
-            type="submit"
-            disabled={!newKeyword.trim() || isProcessing}
-            className="px-4 py-2 bg-slate-800 text-white rounded-xl text-sm font-medium hover:bg-slate-900 disabled:opacity-50 transition-colors"
-          >
-            {t.add}
-          </button>
-        </form>
-
-        <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-          {keywords.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400 p-4 text-center">
-                <span className="text-3xl mb-2">🏷️</span>
-                <p className="text-sm">{t.emptyState.title}</p>
-                <p className="text-xs mt-1 opacity-70">{t.emptyState.desc}</p>
-            </div>
-          ) : (
-            keywords.map((keyword) => (
+              return (
               <div
                 key={keyword.id}
-                className={`group flex items-center justify-between p-3 rounded-xl border transition-all duration-300 ${
-                  keyword.detected
-                    ? 'bg-emerald-50 border-emerald-200 shadow-sm'
-                    : 'bg-white border-slate-100 hover:border-slate-300'
-                }`}
+                className={`group relative flex items-center justify-between p-2 pl-3 rounded-lg border transition-all duration-300 min-h-[42px] ${containerClass}`}
               >
                 {editingId === keyword.id ? (
-                    // Edit Mode
-                    <div className="flex-1 flex items-center gap-2">
-                        <input 
-                            ref={editInputRef}
-                            type="text" 
-                            value={editText}
-                            onChange={(e) => setEditText(e.target.value)}
-                            onKeyDown={handleEditKeyDown}
-                            className="flex-1 px-2 py-1 text-sm border border-indigo-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                        />
-                        <button onClick={saveEdit} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded" aria-label={t.saveAria}>
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
-                        </button>
-                        <button onClick={cancelEdit} className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded" aria-label={t.cancelAria}>
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                        </button>
-                    </div>
+                    // Edit Mode - Floating Overlay
+                    <>
+                        {/* Ghost element to maintain layout stability */}
+                        <div className="invisible flex flex-col min-w-0 flex-1 mr-2 opacity-0 pointer-events-none">
+                            <div className="flex items-center gap-1.5">
+                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-slate-300" />
+                                <span className="text-sm font-medium truncate leading-tight">
+                                    {keyword.text}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Floating Edit Card */}
+                        <div className="absolute top-[-4px] left-[-4px] z-50 min-w-[calc(100%+8px)] w-auto bg-white shadow-xl rounded-xl border border-indigo-200 p-2 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-200 origin-top-left ring-2 ring-indigo-500/10">
+                            <div className="relative flex-1 min-w-[160px]">
+                                <input 
+                                    ref={editInputRef}
+                                    type="text" 
+                                    value={editText}
+                                    onChange={(e) => setEditText(e.target.value)}
+                                    onKeyDown={handleEditKeyDown}
+                                    className="w-full px-2 py-1.5 pr-10 text-xs bg-slate-50 border border-indigo-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-700 font-medium"
+                                />
+                                {renderCharCount(editText)}
+                            </div>
+                            <button onClick={saveEdit} className="p-1.5 text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex-shrink-0 shadow-sm" aria-label={t.saveAria}>
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                            </button>
+                            <button onClick={cancelEdit} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg flex-shrink-0" aria-label={t.cancelAria}>
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                    </>
                 ) : (
                     // View Mode
                     <>
-                        <div className="flex items-center gap-3 overflow-hidden">
-                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${keyword.detected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
-                            <span className={`font-medium truncate ${keyword.detected ? 'text-emerald-900' : 'text-slate-700'}`}>
-                                {keyword.text}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                            {keyword.detected && (
-                                <span className="text-xs font-bold px-2 py-1 bg-emerald-100 text-emerald-700 rounded-md">
-                                    {t.found}
+                        <div className="flex flex-col min-w-0 flex-1 mr-2">
+                            <div className="flex items-center gap-1.5">
+                                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotClass}`} />
+                                <span className={`text-sm font-medium truncate leading-tight ${textClass}`} title={keyword.text}>
+                                    {keyword.text}
                                 </span>
-                            )}
-                            <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button
-                                    onClick={() => startEditing(keyword)}
-                                    disabled={isProcessing}
-                                    className="text-slate-400 hover:text-indigo-600 p-1 transition-colors"
-                                    aria-label={t.editAria}
-                                >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-                                </button>
-                                <button
-                                    onClick={() => removeKeyword(keyword.id)}
-                                    disabled={isProcessing}
-                                    className="text-slate-400 hover:text-red-500 p-1 transition-colors"
-                                    aria-label={t.deleteAria}
-                                >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                                </button>
                             </div>
+                            {/* Stats for this keyword */}
+                            {hasAnalyzed && (keyword.matchCount! > 0 || keyword.fuzzyCount! > 0) && (
+                               <div className="flex gap-2 text-[9px] pl-3 mt-0.5 opacity-80 leading-none">
+                                  {keyword.matchCount! > 0 && <span className="text-emerald-700 font-semibold">{keyword.matchCount}</span>}
+                                  {keyword.fuzzyCount! > 0 && <span className="text-amber-600 font-semibold">~{keyword.fuzzyCount}</span>}
+                               </div>
+                            )}
+                        </div>
+
+                        {/* Actions (Absolute positioned or flex end) */}
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/80 backdrop-blur-[1px] absolute right-1 rounded-md shadow-sm border border-slate-100 p-0.5 z-10">
+                            <button
+                                onClick={() => startEditing(keyword)}
+                                disabled={isProcessing}
+                                className="text-slate-400 hover:text-indigo-600 p-1 transition-colors hover:bg-slate-100 rounded"
+                                aria-label={t.editAria}
+                            >
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                            </button>
+                            <button
+                                onClick={() => removeKeyword(keyword.id)}
+                                disabled={isProcessing}
+                                className="text-slate-400 hover:text-red-500 p-1 transition-colors hover:bg-red-50 rounded"
+                                aria-label={t.deleteAria}
+                            >
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
                         </div>
                     </>
                 )}
               </div>
-            ))
-          )}
+            );
+            })}
         </div>
       </div>
     </div>
