@@ -248,10 +248,47 @@ const AudioInput: React.FC<AudioInputProps> = ({
   const renderTranscriptionContent = () => {
     if (!transcription) return null;
 
-    // 1. Use Marked Transcription if available (Server-side precise & fuzzy highlighting)
+    // Build the regex for EXACT matches from Client-side state.
+    // We use 'translatedText' if available (cross-language), otherwise 'text'.
+    // We only care about keywords that were detected=true.
+    const exactKeywords = keywords.filter(k => k.detected);
+    const exactPhrases = exactKeywords.map(k => k.translatedText || k.text);
+    
+    // Sort phrases by length (descending) to match longest phrases first
+    const uniqueExactPhrases = Array.from(new Set(exactPhrases)).sort((a, b) => b.length - a.length);
+
+    let exactRegex: RegExp | null = null;
+    if (uniqueExactPhrases.length > 0) {
+        // Create regex: (keyword1|keyword2|...) case-insensitive
+        const pattern = `(${uniqueExactPhrases.map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`;
+        exactRegex = new RegExp(pattern, 'gi');
+    }
+
+    // Helper to render text segments with exact match regex highlighting
+    const renderTextWithHighlights = (text: string) => {
+        if (!exactRegex) return <span>{text}</span>;
+        
+        return text.split(exactRegex).map((part, i) => {
+            const lowerPart = part.toLowerCase();
+            const isMatch = uniqueExactPhrases.some(p => p.toLowerCase() === lowerPart);
+            
+            if (isMatch) {
+                return (
+                    <span key={i} className="bg-emerald-100 text-emerald-900 px-1 py-0.5 rounded mx-0.5 font-semibold border-b-2 border-emerald-300">
+                        {part}
+                    </span>
+                );
+            }
+            return <span key={i}>{part}</span>;
+        });
+    };
+
+    // 1. If markedTranscription is available, it contains [e] or [f] tags from LLM.
+    //    We split by these tags. 
+    //    Segments inside [e]...[/e] are Green (LLM exact).
+    //    Segments inside [f]...[/f] are Amber (LLM fuzzy).
+    //    Segments NOT in tags are Plain Text -> We run Client-side Regex on them to highlight Exact matches the LLM skipped.
     if (markedTranscription) {
-        // Regex to split by tags [e]...[/e] and [f]...[/f]
-        // Captures including tags to identify type
         const parts = markedTranscription.split(/(\[e\].*?\[\/e\]|\[f\].*?\[\/f\])/gs);
 
         return parts.map((part, i) => {
@@ -270,59 +307,19 @@ const AudioInput: React.FC<AudioInputProps> = ({
                     </span>
                 );
             } else {
-                return <span key={i}>{part}</span>;
+                // Plain text segment: Apply client-side regex highlighting
+                return <React.Fragment key={i}>{renderTextWithHighlights(part)}</React.Fragment>;
             }
         });
     }
 
-    // 2. Fallback: Client-side highlighting (Exact matches only initially, plus fuzzy segments if any)
-    const exactKeywords = keywords.filter(k => k.detected);
-    const fuzzySegments = keywords.flatMap(k => k.fuzzySegments || []);
-
-    // If no keywords found, just return text
-    if (exactKeywords.length === 0 && fuzzySegments.length === 0) {
-        return <span>{transcription}</span>;
-    }
-
-    // Combine all phrases to match (exact + fuzzy)
-    const exactPhrases = exactKeywords.map(k => k.text);
-    const allPhrases = [...exactPhrases, ...fuzzySegments];
-    
-    // De-duplicate and sort by length (longest first to avoid partial matches inside longer words)
-    const uniquePhrases = Array.from(new Set(allPhrases)).sort((a, b) => b.length - a.length);
-
-    if (uniquePhrases.length === 0) return <span>{transcription}</span>;
-
-    // Create regex to split by keywords for highlighting
-    // Escape regex special characters
-    const pattern = `(${uniquePhrases.map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`;
-    const regex = new RegExp(pattern, 'gi');
-
-    return transcription.split(regex).map((part, i) => {
-        const lowerPart = part.toLowerCase();
-        
-        // Check for Exact Match (Green)
-        const isExactMatch = exactPhrases.some(text => text.toLowerCase() === lowerPart);
-        if (isExactMatch) {
-            return (
-                <span key={i} className="bg-emerald-100 text-emerald-900 px-1 py-0.5 rounded mx-0.5 font-semibold border-b-2 border-emerald-300">
-                    {part}
-                </span>
-            );
-        }
-
-        // Check for Fuzzy Match (Yellow/Amber)
-        const isFuzzyMatch = fuzzySegments.some(text => text.toLowerCase() === lowerPart);
-        if (isFuzzyMatch) {
-            return (
-                <span key={i} className="bg-amber-100 text-amber-900 px-1 py-0.5 rounded mx-0.5 font-semibold border-b-2 border-amber-300">
-                    {part}
-                </span>
-            );
-        }
-
-        return <span key={i}>{part}</span>;
-    });
+    // 2. Fallback: No LLM markup (e.g. LLM not called or failed, or only client matches existed)
+    //    Just run the client-side regex on the full text.
+    return (
+        <span>
+            {renderTextWithHighlights(transcription)}
+        </span>
+    );
   };
 
   return (

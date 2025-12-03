@@ -6,6 +6,7 @@ export interface Keyword {
   matchCount?: number;
   fuzzyCount?: number;
   fuzzySegments?: string[]; // The actual text segments from transcription that matched fuzzily
+  translatedText?: string; // The text used for matching in the audio's language (if different from UI)
 }
 
 export interface AnalysisResult {

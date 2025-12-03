@@ -54,7 +54,7 @@ const App: React.FC = () => {
     setError(null);
     setHasAnalyzed(false);
     setInitialTranscription(null);
-    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [], translatedText: undefined })));
   };
 
   const handleAudioReady = (blob: Blob, mimeType: string, text?: string) => {
@@ -65,7 +65,7 @@ const App: React.FC = () => {
     setError(null);
     setHasAnalyzed(false); // Reset analysis state for new audio
     // Reset detection status when new audio is loaded
-    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [], translatedText: undefined })));
     
     // If text is provided (from Web Speech API or Example), store it
     if (text) {
@@ -92,7 +92,7 @@ const App: React.FC = () => {
           setMarkedTranscription(null);
           setError(null);
           setHasAnalyzed(false);
-          setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+          setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [], translatedText: undefined })));
           return;
       }
 
@@ -101,7 +101,7 @@ const App: React.FC = () => {
       setError(null);
       setHasAnalyzed(false);
       setMarkedTranscription(null);
-      setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+      setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [], translatedText: undefined })));
 
       try {
         const base64Audio = await blobToBase64(currentAudio.blob);
@@ -121,7 +121,7 @@ const App: React.FC = () => {
   }, [currentAudio, initialTranscription, sttProvider, t.processError, language]);
 
   const resetResults = () => {
-    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [] })));
+    setKeywords(prev => prev.map(k => ({ ...k, detected: false, matchCount: 0, fuzzyCount: 0, fuzzySegments: [], translatedText: undefined })));
   };
 
   const handleProcessAudio = async () => {
@@ -145,9 +145,10 @@ const App: React.FC = () => {
 
         // --- Cross-Language Translation Logic ---
         let searchKeywords = [...keywords];
-        // Map: Translated Text -> Original Keyword ID (to map results back)
-        const translationMap: Record<string, string> = {}; 
         
+        // Map to store translated text (ID -> translatedText) to persist in state later
+        const idToTranslatedText: Record<string, string> = {};
+
         // Detect if we need translation:
         // If we have detected audio language, and it doesn't match current UI language prefix
         const needsTranslation = audioLanguage && !audioLanguage.toLowerCase().startsWith(language.toLowerCase());
@@ -160,30 +161,23 @@ const App: React.FC = () => {
              // Update searchKeywords to use translated text
              searchKeywords = keywords.map(k => {
                  const translatedText = translatedMap[k.text] || k.text; // Fallback to original if translation fails
-                 translationMap[translatedText] = k.id; // Map translated text back to ID
+                 idToTranslatedText[k.id] = translatedText;
                  return { ...k, text: translatedText };
              });
         } else {
-             // No translation needed, map original text to ID
-             keywords.forEach(k => {
-                 translationMap[k.text] = k.id;
-             });
+             // No translation needed
         }
 
-        // 1. Client-side Fast Match (using searchKeywords - potentially translated)
+        // 1. Client-side Fast Match (Exact Match)
         const normalizedTranscription = transcription.toLowerCase();
         
-        // We calculate matches on searchKeywords, but need to update the ORIGINAL 'keywords' state
-        // Create a map of updates based on ID
+        // Map to store updates for keywords (ID -> Update Object)
         const updates: Record<string, Partial<Keyword>> = {};
 
         searchKeywords.forEach(sk => {
             const lowerKeyword = sk.text.toLowerCase();
             const isDetected = normalizedTranscription.includes(lowerKeyword);
             
-            // If translated, finding the ID is tricky if multiple keywords translate to same word, 
-            // but we use the index based logic or the map we created.
-            // Since we reconstructed searchKeywords from keywords, the ID is preserved in the object.
             updates[sk.id] = {
                 detected: isDetected,
                 matchCount: isDetected ? 1 : 0,
@@ -192,41 +186,53 @@ const App: React.FC = () => {
             };
         });
 
-        // 2. Server-side Deep Semantic Match (LLM) using searchKeywords
-        const keywordTextsToSearch = searchKeywords.map(k => k.text);
-        const result = await analyzeKeywordsWithLLM(transcription, keywordTextsToSearch);
+        // 2. Filter keywords for LLM (Deep Semantic Match)
+        // Optimization: Only send keywords that were NOT detected by exact match
+        const keywordsForLLM = searchKeywords.filter(sk => !updates[sk.id]?.detected);
 
-        // 3. Merge results back into state
-        if (result) {
-            setMarkedTranscription(result.marked_transcript);
+        // 3. Call Server-side LLM
+        if (keywordsForLLM.length > 0) {
+            const keywordTextsToSearch = keywordsForLLM.map(k => k.text);
+            const result = await analyzeKeywordsWithLLM(transcription, keywordTextsToSearch);
 
-            const analysisResults = result.analysis;
-            if (analysisResults && analysisResults.length > 0) {
-                analysisResults.forEach(r => {
-                    // r.object is the text used for searching (translated text if applicable)
-                    // We need to find the corresponding original keyword ID.
-                    
-                    // Strategy: Find the searchKeyword that matches r.object
-                    const matchedSearchKeyword = searchKeywords.find(sk => sk.text === r.object);
-                    
-                    if (matchedSearchKeyword) {
-                        const originalId = matchedSearchKeyword.id;
-                        updates[originalId] = {
-                            ...updates[originalId], // keep previous simple match if needed, but usually LLM overrides
-                            detected: r.absolute_pair > 0,
-                            matchCount: r.absolute_pair,
-                            fuzzyCount: r.blur_pair,
-                            fuzzySegments: r.fuzzy_segments || []
-                        };
-                    }
-                });
+            if (result) {
+                setMarkedTranscription(result.marked_transcript);
+
+                const analysisResults = result.analysis;
+                if (analysisResults && analysisResults.length > 0) {
+                    analysisResults.forEach(r => {
+                        // r.object is the text used for searching (translated text if applicable)
+                        // Find the corresponding original keyword ID.
+                        const matchedSearchKeyword = searchKeywords.find(sk => sk.text === r.object);
+                        
+                        if (matchedSearchKeyword) {
+                            const originalId = matchedSearchKeyword.id;
+                            updates[originalId] = {
+                                ...updates[originalId], 
+                                detected: r.absolute_pair > 0, // LLM might find exact match client missed?
+                                matchCount: r.absolute_pair,
+                                fuzzyCount: r.blur_pair,
+                                fuzzySegments: r.fuzzy_segments || []
+                            };
+                        }
+                    });
+                }
             }
+        } else {
+            // If all keywords matched exactly on client, we don't need LLM.
+            // Clear marked transcription (or we could rely on client-side regex highlighting entirely)
+            setMarkedTranscription(null);
         }
 
-        // Apply all updates to the original keywords state
+        // 4. Apply all updates to the original keywords state
         setKeywords(prev => prev.map(k => {
             const update = updates[k.id];
-            return update ? { ...k, ...update } : k;
+            const translatedText = idToTranslatedText[k.id];
+            return { 
+                ...k, 
+                ...(update || {}),
+                translatedText: translatedText // Persist translation for frontend Regex matching
+            };
         }));
 
         setHasAnalyzed(true);
